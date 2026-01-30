@@ -346,30 +346,81 @@ def calculate_trix(prices: List[float], period: int = 14) -> float:
 
 
 def calculate_adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-    if len(highs) < period + 2 or len(lows) < period + 2 or len(closes) < period + 2:
+    """
+    Correct ADX (Wilder). Output ~0..100.
+    """
+    n = min(len(highs), len(lows), len(closes))
+    if n < period + 2:
         return 0.0
 
-    tr_list: List[float] = []
+    tr: List[float] = []
     plus_dm: List[float] = []
     minus_dm: List[float] = []
 
-    for i in range(1, len(closes)):
+    for i in range(1, n):
         up_move = highs[i] - highs[i - 1]
         down_move = lows[i - 1] - lows[i]
 
         pdm = up_move if (up_move > down_move and up_move > 0) else 0.0
         mdm = down_move if (down_move > up_move and down_move > 0) else 0.0
 
-        tr = max(
+        true_range = max(
             highs[i] - lows[i],
             abs(highs[i] - closes[i - 1]),
             abs(lows[i] - closes[i - 1]),
         )
 
-        tr_list.append(float(tr))
+        tr.append(float(true_range))
         plus_dm.append(float(pdm))
         minus_dm.append(float(mdm))
 
+    if len(tr) < period:
+        return 0.0
+
+    def wilder_sum(values: List[float], p: int) -> List[float]:
+        out: List[float] = []
+        first = sum(values[:p])
+        out.append(float(first))
+        prev = float(first)
+        for v in values[p:]:
+            prev = prev - (prev / p) + float(v)
+            out.append(prev)
+        return out
+
+    tr_s = wilder_sum(tr, period)
+    pdm_s = wilder_sum(plus_dm, period)
+    mdm_s = wilder_sum(minus_dm, period)
+
+    di_plus: List[float] = []
+    di_minus: List[float] = []
+    for t, p, m in zip(tr_s, pdm_s, mdm_s):
+        if t <= 0:
+            di_plus.append(0.0)
+            di_minus.append(0.0)
+        else:
+            di_plus.append(100.0 * (p / t))
+            di_minus.append(100.0 * (m / t))
+
+    dx: List[float] = []
+    for p, m in zip(di_plus, di_minus):
+        denom = p + m
+        dx.append(0.0 if denom == 0 else 100.0 * abs(p - m) / denom)
+
+    if len(dx) < period:
+        return 0.0
+
+    # First ADX = average first period DX, then Wilder smoothing (average form)
+    adx = float(sum(dx[:period]) / period)
+    for v in dx[period:]:
+        adx = (adx * (period - 1) + float(v)) / period
+
+    # clamp
+    if adx < 0:
+        adx = 0.0
+    if adx > 100:
+        adx = 100.0
+
+    return float(round(adx, 2))
     def wilder_smooth(values: List[float], p: int) -> List[float]:
         if len(values) < p:
             return []
@@ -1297,4 +1348,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
