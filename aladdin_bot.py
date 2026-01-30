@@ -627,7 +627,6 @@ def get_trend_filter_4h() -> Dict[str, float]:
 # =========================
 # MAIN DATA (Bybit -> OKX -> CoinGecko)
 # =========================
-Катя Подкидыш, [30.01.2026 19:49]
 def get_btc_data() -> Dict[str, Any]:
     data: Dict[str, Any] = {
         "o": 0.0,
@@ -745,8 +744,7 @@ def get_btc_data() -> Dict[str, Any]:
 
         if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 200:
             candles = list(reversed(okx["data"]))
-
-Катя Подкидыш, [30.01.2026 19:49]
+            
 opens = [float(x[1]) for x in candles]
             highs = [float(x[2]) for x in candles]
             lows = [float(x[3]) for x in candles]
@@ -1300,5 +1298,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
