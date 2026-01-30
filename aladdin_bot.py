@@ -1,5 +1,5 @@
 # =========================
-# PART 1/2
+# PART 1/2 (FULL + BYBIT/OKX/COINGECKO FALLBACK)
 # =========================
 import asyncio
 import time
@@ -51,17 +51,14 @@ dp = Dispatcher()
 
 
 # =========================
-# BYBIT DOMAINS (fallback)
+# DATA SOURCES (fallback)
 # =========================
-# Можно переопределить переменной окружения BYBIT_BASE,
-# но даже без неё будет fallback api.bybit.com -> api.bytick.com
+# Optional override (Railway Variables): BYBIT_BASE=https://api.bytick.com
 BYBIT_BASE = os.getenv("BYBIT_BASE", "").strip()
-
-BYBIT_DOMAINS = []
+BYBIT_DOMAINS: List[str] = []
 if BYBIT_BASE:
     BYBIT_DOMAINS.append(BYBIT_BASE)
 
-# дефолтные
 BYBIT_DOMAINS += [
     "https://api.bybit.com",
     "https://api.bytick.com",
@@ -73,8 +70,6 @@ BYBIT_DOMAINS += [
 # =========================
 state_lock = asyncio.Lock()
 user_states_lock = asyncio.Lock()
-
-# ✅ анти-гонки по кликам
 user_action_lock = defaultdict(asyncio.Lock)
 
 state = {
@@ -129,7 +124,7 @@ DISCLAIMER_TEXT = """
 
 
 # =========================
-# HTTP HELPER + BYBIT HELPER (FIXED)
+# HTTP HELPERS
 # =========================
 _session = requests.Session()
 _session.headers.update({
@@ -140,7 +135,7 @@ _session.headers.update({
 
 def http_get_json(url: str, *, timeout: int = 10, retries: int = 2) -> Any:
     """
-    Логирует HTTP ошибки (403/451/5xx) и первые 200 символов тела.
+    Логирует HTTP ошибки (403/451/5xx) + первые 200 символов ответа.
     """
     last_err = None
     for attempt in range(retries + 1):
@@ -160,8 +155,7 @@ def http_get_json(url: str, *, timeout: int = 10, retries: int = 2) -> Any:
 
 def bybit_get_json(path: str, *, timeout: int = 12, retries: int = 1) -> Any:
     """
-    Пробует домены Bybit по очереди: api.bybit.com -> api.bytick.com (или BYBIT_BASE).
-    Возвращает json или None.
+    Bybit fallback: BYBIT_BASE (если задан) -> api.bybit.com -> api.bytick.com
     """
     last_exc = None
     for base in BYBIT_DOMAINS:
@@ -171,11 +165,33 @@ def bybit_get_json(path: str, *, timeout: int = 12, retries: int = 1) -> Any:
         except Exception as e:
             last_exc = e
             logger.error(f"BYBIT domain failed: {base} | err={e}")
-            continue
-
     if last_exc:
         logger.error(f"BYBIT all domains failed. last_err={last_exc}")
     return None
+
+
+def okx_get_json(path: str, *, timeout: int = 12, retries: int = 1) -> Any:
+    """
+    OKX обычно не блокируется.
+    """
+    url = "https://www.okx.com" + path
+    try:
+        return http_get_json(url, timeout=timeout, retries=retries)
+    except Exception as e:
+        logger.error(f"OKX failed: {e}")
+        return None
+
+
+def coingecko_get_json(path: str, *, timeout: int = 12, retries: int = 1) -> Any:
+    """
+    CoinGecko почти всегда доступен (не биржа).
+    """
+    url = "https://api.coingecko.com" + path
+    try:
+        return http_get_json(url, timeout=timeout, retries=retries)
+    except Exception as e:
+        logger.error(f"CoinGecko failed: {e}")
+        return None
 
 
 # =========================
@@ -198,7 +214,7 @@ async def safe_edit_text(msg: Message, text: str, *, reply_markup=None, parse_mo
 
 
 # =========================
-# INDICATORS (SAFE)
+# INDICATORS
 # =========================
 def calculate_ema(prices: List[float], period: int = 14) -> List[float]:
     if not prices:
@@ -445,16 +461,11 @@ def save_history(history: List[Dict[str, Any]]):
 
 
 def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> float:
-    """
-    step=3 -> сравнение с ценой через ~15 минут (если обновления каждые 5м)
-    WAIT в точность не учитываем (и мы его не сохраняем вообще).
-    """
     if len(history) < 2:
         return 50.0
 
     wins = 0
     losses = 0
-
     start_idx = max(0, len(history) - 80)
 
     for i in range(start_idx, len(history) - 1):
@@ -497,7 +508,7 @@ def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> fl
 
     return round((wins / total) * 100.0, 1)
 # =========================
-# PART 2/2
+# PART 2/2 (FULL + FALLBACK DATA + UI)
 # =========================
 
 # =========================
@@ -564,7 +575,8 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
         risk_points += 25
         risk_factors.append("💥 Волатильность экстремальная")
 
-    if vol_usdt < 200_000_000:
+    # ✅ ВАЖНО: если vol_usdt == 0 (CoinGecko), НЕ штрафуем “низкий объём”
+    if vol_usdt > 0 and vol_usdt < 200_000_000:
         risk_points += 15
         risk_factors.append("📉 Низкий объем")
 
@@ -572,176 +584,218 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
 
 
 # =========================
-# 4H TREND FILTER (BYBIT)
+# 4H TREND FILTER (Bybit -> OKX)
 # =========================
 def get_trend_filter_4h() -> Dict[str, float]:
     out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
+
+    # 1) Bybit
     try:
         resp = bybit_get_json(
             "/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=300",
             timeout=12,
             retries=1
         )
-        if not resp:
-            logger.error("BYBIT 4h kline: NO RESPONSE")
-            return out
+        if resp and resp.get("retCode") in (0, "0"):
+            lst = (((resp.get("result") or {}).get("list")) or [])
+            if isinstance(lst, list) and len(lst) >= 210:
+                lst = list(reversed(lst))
+                closes = [float(k[4]) for k in lst]
+                ema50 = calculate_ema(closes, 50)
+                ema200 = calculate_ema(closes, 200)
+                out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
+                out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
+                return out
+    except Exception as e:
+        logger.error(f"Trend Bybit failed: {e}")
 
-        ret_code = resp.get("retCode")
-        ret_msg = resp.get("retMsg")
-        if ret_code not in (0, "0"):
-            logger.error(f"BYBIT 4h kline retCode={ret_code} retMsg={ret_msg} resp={str(resp)[:250]}")
-            return out
-
-        lst = (((resp or {}).get("result") or {}).get("list")) or []
-        if not isinstance(lst, list) or len(lst) < 210:
-            logger.error(f"BYBIT 4h kline empty/short list: len={len(lst) if isinstance(lst, list) else 'NA'}")
-            return out
-
-        lst = list(reversed(lst))
-        closes = [float(k[4]) for k in lst]  # [start, o, h, l, c, vol, turnover]
-
+    # 2) OKX
+    okx = okx_get_json("/api/v5/market/candles?instId=BTC-USDT&bar=4H&limit=300", timeout=12, retries=1)
+    if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 210:
+        candles = list(reversed(okx["data"]))  # oldest->newest
+        closes = [float(x[4]) for x in candles]
         ema50 = calculate_ema(closes, 50)
         ema200 = calculate_ema(closes, 200)
         out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
         out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
+        return out
 
-    except Exception as e:
-        logger.exception(f"get_trend_filter_4h failed: {e}")
+    logger.error("Trend 4H: no data from Bybit/OKX (will use no trend filter)")
     return out
 
 
 # =========================
-# BYBIT DATA (5m)
+# MAIN DATA (Bybit -> OKX -> CoinGecko)
 # =========================
 def get_btc_data() -> Dict[str, Any]:
     data: Dict[str, Any] = {
-        "o": 0.0,
-        "h": 0.0,
-        "l": 0.0,
-        "c": 0.0,
-
-        "vol_btc": 0.0,
-        "vol_usdt": 0.0,
-        "vol": 0.0,
-
+        "o": 0.0, "h": 0.0, "l": 0.0, "c": 0.0,
+        "vol_btc": 0.0, "vol_usdt": 0.0, "vol": 0.0,
         "spread": 0.0,
-
-        "rsi": 50.0,
-        "sma12": 0.0,
-        "ma20": 0.0,
-        "ema12": 0.0,
-        "wma20": 0.0,
-
-        "bb_position": 50.0,
-        "vwap": 0.0,
-        "sar": 0.0,
-        "supertrend": 0.0,
-        "trix": 0.0,
-        "adx": 0.0,
-        "vol_ratio": 1.0,
+        "rsi": 50.0, "sma12": 0.0, "ma20": 0.0, "ema12": 0.0, "wma20": 0.0,
+        "bb_position": 50.0, "vwap": 0.0, "sar": 0.0, "supertrend": 0.0,
+        "trix": 0.0, "adx": 0.0, "vol_ratio": 1.0,
+        "_source": "none",
     }
 
+    # -------------------------
+    # 1) BYBIT
+    # -------------------------
     try:
         resp = bybit_get_json(
             "/v5/market/kline?category=linear&symbol=BTCUSDT&interval=5&limit=1000",
             timeout=12,
             retries=1
         )
-        if not resp:
-            logger.error("BYBIT 5m kline: NO RESPONSE")
-            return data
 
-        ret_code = resp.get("retCode")
-        ret_msg = resp.get("retMsg")
-        if ret_code not in (0, "0"):
-            logger.error(f"BYBIT kline retCode={ret_code} retMsg={ret_msg} resp={str(resp)[:250]}")
-            # подсказки по логам:
-            # HTTP 403/451 -> домен режется
-            # retCode=10006 -> лимит
-            return data
+        if resp and resp.get("retCode") not in (0, "0"):
+            logger.error(f"BYBIT kline retCode={resp.get('retCode')} retMsg={resp.get('retMsg')} resp={str(resp)[:200]}")
 
-        klines = (((resp or {}).get("result") or {}).get("list")) or []
-        if not isinstance(klines, list) or len(klines) < 200:
-            logger.error(f"BYBIT empty/short list (kline): len={len(klines) if isinstance(klines, list) else 'NA'}")
-            return data
+        if resp and resp.get("retCode") in (0, "0"):
+            klines = (((resp.get("result") or {}).get("list")) or [])
+            if isinstance(klines, list) and len(klines) >= 200:
+                klines = list(reversed(klines))  # oldest->newest
 
-        klines = list(reversed(klines))
+                opens = [float(k[1]) for k in klines]
+                highs = [float(k[2]) for k in klines]
+                lows = [float(k[3]) for k in klines]
+                closes = [float(k[4]) for k in klines]
+                base_vols = [float(k[5]) for k in klines]
+                quote_vols = [float(k[6]) for k in klines]
 
-        # Bybit: [startTime, open, high, low, close, volume, turnover]
-        opens = [float(k[1]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
-        closes = [float(k[4]) for k in klines]
+                window = 144 if len(klines) >= 144 else len(klines)
 
-        base_vols = [float(k[5]) for k in klines]   # BTC
-        quote_vols = [float(k[6]) for k in klines]  # USDT turnover
+                data["o"] = float(opens[-window])
+                data["h"] = float(max(highs[-window:]))
+                data["l"] = float(min(lows[-window:]))
+                data["c"] = float(closes[-1])
 
-        window = 144 if len(klines) >= 144 else len(klines)
+                data["vol_btc"] = float(sum(base_vols[-window:]))
+                data["vol_usdt"] = float(sum(quote_vols[-window:]))
+                data["vol"] = data["vol_usdt"]
 
-        data["o"] = float(opens[-window])
-        data["h"] = float(max(highs[-window:]))
-        data["l"] = float(min(lows[-window:]))
-        data["c"] = float(closes[-1])
+                data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
+                data["ma20"] = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
 
-        data["vol_btc"] = float(sum(base_vols[-window:]))
-        data["vol_usdt"] = float(sum(quote_vols[-window:]))
-        data["vol"] = data["vol_usdt"]
+                ema12_list = calculate_ema(closes, 12)
+                data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
+                data["wma20"] = float(calculate_wma(closes, 20))
 
-        data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
-        data["ma20"] = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
+                data["rsi"] = float(calculate_rsi(closes[-200:]))
 
-        ema12_list = calculate_ema(closes, 12)
-        data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
-        data["wma20"] = float(calculate_wma(closes, 20))
+                bb = calculate_bollinger(closes, 20)
+                data["bb_position"] = float(bb_position(data["c"], bb))
 
-        data["rsi"] = float(calculate_rsi(closes[-200:]))
+                data["vwap"] = float(calculate_vwap(opens, highs, lows, closes, base_vols, period=20))
+                data["sar"] = float(calculate_sar(highs, lows))
+                data["supertrend"] = float(calculate_supertrend(highs, lows, closes))
+                data["trix"] = float(calculate_trix(closes))
+                data["adx"] = float(calculate_adx(highs, lows, closes))
 
-        bb = calculate_bollinger(closes, 20)
-        data["bb_position"] = float(bb_position(data["c"], bb))
+                if len(quote_vols) >= 40:
+                    avg_prev = sum(quote_vols[-40:-20]) / 20
+                    avg_curr = sum(quote_vols[-20:]) / 20
+                    data["vol_ratio"] = float(avg_curr / avg_prev) if avg_prev > 0 else 1.0
 
-        data["vwap"] = float(calculate_vwap(opens, highs, lows, closes, base_vols, period=20))
+                tick = bybit_get_json(
+                    "/v5/market/tickers?category=linear&symbol=BTCUSDT",
+                    timeout=8,
+                    retries=1
+                )
+                if tick and tick.get("retCode") in (0, "0"):
+                    tl = (((tick.get("result") or {}).get("list")) or [])
+                    if isinstance(tl, list) and tl:
+                        bid = float(tl[0].get("bid1Price", data["c"]))
+                        ask = float(tl[0].get("ask1Price", data["c"]))
+                        data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
 
-        data["sar"] = float(calculate_sar(highs, lows))
-        data["supertrend"] = float(calculate_supertrend(highs, lows, closes))
+                data["_source"] = "bybit"
+                return data
 
-        data["trix"] = float(calculate_trix(closes))
-        data["adx"] = float(calculate_adx(highs, lows, closes))
-
-        if len(quote_vols) >= 40:
-            avg_prev = sum(quote_vols[-40:-20]) / 20
-            avg_curr = sum(quote_vols[-20:]) / 20
-            data["vol_ratio"] = float(avg_curr / avg_prev) if avg_prev > 0 else 1.0
-        else:
-            data["vol_ratio"] = 1.0
-
-        # spread через tickers
-        tick = bybit_get_json(
-            "/v5/market/tickers?category=linear&symbol=BTCUSDT",
-            timeout=8,
-            retries=1
-        )
-        if not tick:
-            logger.error("BYBIT tickers: NO RESPONSE")
-            return data
-
-        t_code = tick.get("retCode")
-        t_msg = tick.get("retMsg")
-        if t_code not in (0, "0"):
-            logger.error(f"BYBIT tickers retCode={t_code} retMsg={t_msg} resp={str(tick)[:250]}")
-            return data
-
-        tick_list = (((tick or {}).get("result") or {}).get("list")) or []
-        if isinstance(tick_list, list) and tick_list:
-            t0 = tick_list[0]
-            bid = float(t0.get("bid1Price", data["c"]))
-            ask = float(t0.get("ask1Price", data["c"]))
-            data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
-        else:
-            logger.error("BYBIT tickers list empty")
+        logger.error("BYBIT: empty/short list or no response -> fallback to OKX/CoinGecko")
 
     except Exception as e:
-        logger.exception(f"get_btc_data failed: {e}")
+        logger.error(f"BYBIT exception -> fallback: {e}")
 
+    # -------------------------
+    # 2) OKX
+    # -------------------------
+    try:
+        okx = okx_get_json("/api/v5/market/candles?instId=BTC-USDT&bar=5m&limit=1000", timeout=12, retries=1)
+        if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 200:
+            candles = list(reversed(okx["data"]))  # oldest->newest
+            opens = [float(x[1]) for x in candles]
+            highs = [float(x[2]) for x in candles]
+            lows = [float(x[3]) for x in candles]
+            closes = [float(x[4]) for x in candles]
+
+            window = 144 if len(candles) >= 144 else len(candles)
+
+            data["o"] = float(opens[-window])
+            data["h"] = float(max(highs[-window:]))
+            data["l"] = float(min(lows[-window:]))
+            data["c"] = float(closes[-1])
+
+            data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
+            data["ma20"] = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
+            ema12_list = calculate_ema(closes, 12)
+            data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
+            data["wma20"] = float(calculate_wma(closes, 20))
+            data["rsi"] = float(calculate_rsi(closes[-200:]))
+
+            bb = calculate_bollinger(closes, 20)
+            data["bb_position"] = float(bb_position(data["c"], bb))
+
+            t = okx_get_json("/api/v5/market/ticker?instId=BTC-USDT", timeout=8, retries=1)
+            if t and isinstance(t.get("data"), list) and t["data"]:
+                bid = float(t["data"][0].get("bidPx", data["c"]))
+                ask = float(t["data"][0].get("askPx", data["c"]))
+                data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
+
+            data["_source"] = "okx"
+            return data
+
+        logger.error("OKX: no candles -> fallback to CoinGecko")
+
+    except Exception as e:
+        logger.error(f"OKX exception -> fallback: {e}")
+
+    # -------------------------
+    # 3) CoinGecko (last resort)
+    # -------------------------
+    try:
+        ohlc = coingecko_get_json("/api/v3/coins/bitcoin/ohlc?vs_currency=usd&days=1", timeout=12, retries=1)
+        if isinstance(ohlc, list) and len(ohlc) >= 50:
+            opens = [float(x[1]) for x in ohlc]
+            highs = [float(x[2]) for x in ohlc]
+            lows = [float(x[3]) for x in ohlc]
+            closes = [float(x[4]) for x in ohlc]
+
+            data["o"] = float(opens[0])
+            data["h"] = float(max(highs))
+            data["l"] = float(min(lows))
+            data["c"] = float(closes[-1])
+
+            data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
+            data["ma20"] = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
+            ema12_list = calculate_ema(closes, 12)
+            data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
+            data["wma20"] = float(calculate_wma(closes, 20))
+            data["rsi"] = float(calculate_rsi(closes[-200:]))
+
+            bb = calculate_bollinger(closes, 20)
+            data["bb_position"] = float(bb_position(data["c"], bb))
+
+            data["spread"] = float(data["c"] * 0.0002)  # fake minimal spread
+            data["_source"] = "coingecko"
+            return data
+
+        logger.error("CoinGecko: no ohlc data")
+
+    except Exception as e:
+        logger.error(f"CoinGecko exception: {e}")
+
+    logger.error("ALL SOURCES FAILED: Bybit + OKX + CoinGecko returned no candles")
     return data
 
 
@@ -845,7 +899,6 @@ def aladdin_PRO_analysis():
     risk_percent, risk_factors = calculate_risk(data)
     target, stop, profit_pct, loss_pct = calculate_targets_PRO(data, direction)
 
-    # ✅ WAIT не сохраняем
     if not direction.startswith("⚪"):
         forecast = {
             "time": datetime.now().isoformat(),
@@ -993,9 +1046,11 @@ async def analyze_cb(callback: CallbackQuery):
             rr = abs(profit / loss) if loss not in (0.0, -0.0) else 0.0
             vola = ((h - l) / c * 100.0) if c else 0.0
 
+            src = str(data.get("_source", "none"))
             analysis_text = f"""# 📊 АНАЛИЗ
 
 # {direction} (`{conf:.1f}%`)
+# 🛰 Source: `{src}`
 # 📊 RSI: `{float(data.get('rsi', 50)):.1f}`
 # 🌊 Volat(12h): `{vola:.1f}%`
 # 📈 MA20: `{float(data.get('ma20', c)):,.0f}$`
@@ -1034,10 +1089,12 @@ async def indicators_cb(callback: CallbackQuery):
         try:
             data, direction, conf, _, _, _, _, _, _, _, _, _ = await asyncio.to_thread(aladdin_cached)
             c = float(data.get("c", 0) or 0)
+            src = str(data.get("_source", "none"))
 
             indicators_text = f"""# 📈 *ИНДИКАТОРЫ* — что они значат? 🤔
 
 # 🔥 *ОСНОВНОЙ СИГНАЛ:* `{direction}` `{conf:.1f}%`
+# 🛰 Source: `{src}`
 
 ────────────────────
 
@@ -1110,19 +1167,23 @@ async def risk_cb(callback: CallbackQuery):
             vol_usdt = float(data.get("vol_usdt", data.get("vol", 0)) or 0)
             vol_btc = float(data.get("vol_btc", 0) or 0)
 
+            # покажем источник данных, если ты включила _source в get_btc_data()
+            src = str(data.get("_source", "")).strip()
+            src_line = f"\n# 🛰 Source: `{src}`\n" if src else "\n"
+
             risk_text = f"""# ⚠️ *РИСК ({risk}%) & СТАТИСТИКА*
 ─────────────────
 # 🎚️ RSI: `{float(data.get('rsi', 50)):.1f}`
 # 📊 Volat: `{vola:.1f}%`
 # 📈 History: `{hist_acc}%`
-
-# 💰 Volume(12h): `{vol_usdt:,.0f}$`
+{src_line}# 💰 Volume(12h): `{vol_usdt:,.0f}$`
 # 🪙 Volume BTC(12h): `{vol_btc:,.0f} BTC`
 
 # 🔍 *Факторы риска:*
 {factors_text}
 """
 
+            # ✅ Сигналы показываем тут
             if signals:
                 risk_text += "\n# 📌 *Сигналы:*\n" + "\n".join([f"• {s}" for s in signals[:12]])
 
@@ -1147,12 +1208,12 @@ async def alerts_cb(callback: CallbackQuery):
             state["alert_chat_id"] = callback.message.chat.id
 
         await callback.answer()
-        alerts_text = """ 🚨 *АЛЕРТЫ АКТИВНЫ* ✅
+        alerts_text = """# 🚨 АЛЕРТЫ АКТИВНЫ ✅
 
-# ⏰ *Каждые 5 минут проверка:*
-#🔄 Смена сигнала LONG/SHORT/WAIT
-#📈 Движение >2.5%
-#🚨 RSI >78 / <22
+# ⏰ Каждые 5 минут проверка:
+# 🔄 Смена сигнала LONG/SHORT/WAIT
+# 📈 Движение >2.5%
+# 🚨 RSI >78 / <22
 """
         await safe_edit_text(callback.message, alerts_text, parse_mode="Markdown")
         await callback.message.answer("Что дальше?", reply_markup=main_keyboard())
@@ -1168,6 +1229,7 @@ async def alert_loop():
                 _, direction, _, _, _, _, _, _, _, _, _, alerts = await asyncio.to_thread(aladdin_cached)
 
                 for alert in alerts:
+                    # если вдруг alert начинается со смайла — мы всё равно добавим "# "
                     if direction.startswith("⚪") and "СИГНАЛ СМЕНИЛСЯ" in alert:
                         continue
                     await bot.send_message(chat_id, f"# 🚨 *PRO АЛЕРТ*\n# {alert}", parse_mode="Markdown")
