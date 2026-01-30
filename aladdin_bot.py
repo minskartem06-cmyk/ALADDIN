@@ -1171,7 +1171,7 @@ async def indicators_cb(callback: CallbackQuery):
 # 🚀 *SAR: `{float(data.get('sar', c)):,.0f}$`*
 Цена выше SAR = рост 🟢
 
-# ⚡ *TRIX: `{float(data.get('trix', 0)):.2f}`*
+# ⚡️ *TRIX: {float(data.get('trix', 0)):+.4f}%*
 #🟢 >0 = импульс вверх
 #🔴 <0 = импульс вниз
 
@@ -1297,3 +1297,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
