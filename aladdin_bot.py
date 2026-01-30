@@ -531,7 +531,7 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
 def get_trend_filter_4h() -> Dict[str, float]:
     out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=4h&limit=300"
+        url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=300"
         klines = http_get_json(url, timeout=12, retries=2)
 
         if not isinstance(klines, list) or len(klines) < 210:
@@ -639,7 +639,7 @@ def get_btc_data() -> Dict[str, Any]:
             data["vol_ratio"] = 1.0
 
         book = http_get_json(
-            "https://api.binance.com/api/v3/ticker/bookTicker?symbol=BTCUSDT",
+            "https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=BTCUSDT",
             timeout=8,
             retries=2
         )
@@ -1100,4 +1100,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
