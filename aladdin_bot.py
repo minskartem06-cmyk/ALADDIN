@@ -1,5 +1,5 @@
 # =========================
-# PART 1/2  (BYBIT FIXED)
+# PART 1/2
 # =========================
 import asyncio
 import time
@@ -51,6 +51,24 @@ dp = Dispatcher()
 
 
 # =========================
+# BYBIT DOMAINS (fallback)
+# =========================
+# Можно переопределить переменной окружения BYBIT_BASE,
+# но даже без неё будет fallback api.bybit.com -> api.bytick.com
+BYBIT_BASE = os.getenv("BYBIT_BASE", "").strip()
+
+BYBIT_DOMAINS = []
+if BYBIT_BASE:
+    BYBIT_DOMAINS.append(BYBIT_BASE)
+
+# дефолтные
+BYBIT_DOMAINS += [
+    "https://api.bybit.com",
+    "https://api.bytick.com",
+]
+
+
+# =========================
 # GLOBAL STATE + LOCKS
 # =========================
 state_lock = asyncio.Lock()
@@ -74,7 +92,7 @@ user_states = defaultdict(lambda: {
 # =========================
 # CACHE
 # =========================
-CACHE_SECONDS = 15
+CACHE_SECONDS = 20
 _analysis_cache = {"time": 0.0, "data": None}
 _cache_lock = threading.Lock()
 
@@ -89,9 +107,9 @@ HISTORY_FILE = Path("aladdin_history.json")
 # DISCLAIMER
 # =========================
 DISCLAIMER_TEXT = """
-#🔥 *ALADDIN v10.0 — 5000+ СВЕЧЕЙ ДАННЫХ!*
+# 🔥 *ALADDIN v10.0 — 5000+ СВЕЧЕЙ ДАННЫХ!*
 
-#⚠️ *ОБЯЗАТЕЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ ПЕРЕД ИСПОЛЬЗОВАНИЕМ*
+# ⚠️ *ОБЯЗАТЕЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ ПЕРЕД ИСПОЛЬЗОВАНИЕМ*
 
 #*📜 ПОЛЬЗОВАТЕЛЬСКОЕ СОГЛАСИЕ*
 
@@ -107,27 +125,57 @@ DISCLAIMER_TEXT = """
 #✅ Принимаю ВСЕ риски на себя
 #✅ Осознаю возможные убытки
 #✅ Согласен с отсутствием гарантий
-"""
+""".strip()
 
 
 # =========================
-# HTTP HELPER
+# HTTP HELPER + BYBIT HELPER (FIXED)
 # =========================
 _session = requests.Session()
+_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Railway; ALADDIN bot)",
+    "Accept": "application/json",
+})
+
 
 def http_get_json(url: str, *, timeout: int = 10, retries: int = 2) -> Any:
+    """
+    Логирует HTTP ошибки (403/451/5xx) и первые 200 символов тела.
+    """
     last_err = None
     for attempt in range(retries + 1):
         try:
             r = _session.get(url, timeout=timeout)
+            if r.status_code != 200:
+                logger.error(f"HTTP {r.status_code} for {url} | body={r.text[:200]}")
             r.raise_for_status()
             return r.json()
         except Exception as e:
             last_err = e
             if attempt < retries:
-                time.sleep(0.35 * (attempt + 1))
+                time.sleep(0.5 * (attempt + 1))
             else:
                 raise last_err
+
+
+def bybit_get_json(path: str, *, timeout: int = 12, retries: int = 1) -> Any:
+    """
+    Пробует домены Bybit по очереди: api.bybit.com -> api.bytick.com (или BYBIT_BASE).
+    Возвращает json или None.
+    """
+    last_exc = None
+    for base in BYBIT_DOMAINS:
+        url = base.rstrip("/") + path
+        try:
+            return http_get_json(url, timeout=timeout, retries=retries)
+        except Exception as e:
+            last_exc = e
+            logger.error(f"BYBIT domain failed: {base} | err={e}")
+            continue
+
+    if last_exc:
+        logger.error(f"BYBIT all domains failed. last_err={last_exc}")
+    return None
 
 
 # =========================
@@ -397,6 +445,10 @@ def save_history(history: List[Dict[str, Any]]):
 
 
 def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> float:
+    """
+    step=3 -> сравнение с ценой через ~15 минут (если обновления каждые 5м)
+    WAIT в точность не учитываем (и мы его не сохраняем вообще).
+    """
     if len(history) < 2:
         return 50.0
 
@@ -445,7 +497,7 @@ def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> fl
 
     return round((wins / total) * 100.0, 1)
 # =========================
-# PART 2/2  (BYBIT FIXED)
+# PART 2/2
 # =========================
 
 # =========================
@@ -520,22 +572,29 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
 
 
 # =========================
-# 4H TREND FILTER  (BYBIT)
+# 4H TREND FILTER (BYBIT)
 # =========================
 def get_trend_filter_4h() -> Dict[str, float]:
     out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
     try:
-        url = (
-            "https://api.bybit.com/v5/market/kline"
-            "?category=linear"
-            "&symbol=BTCUSDT"
-            "&interval=240"
-            "&limit=300"
+        resp = bybit_get_json(
+            "/v5/market/kline?category=linear&symbol=BTCUSDT&interval=240&limit=300",
+            timeout=12,
+            retries=1
         )
-        resp = http_get_json(url, timeout=12, retries=2)
-        lst = (((resp or {}).get("result") or {}).get("list")) or []
+        if not resp:
+            logger.error("BYBIT 4h kline: NO RESPONSE")
+            return out
 
+        ret_code = resp.get("retCode")
+        ret_msg = resp.get("retMsg")
+        if ret_code not in (0, "0"):
+            logger.error(f"BYBIT 4h kline retCode={ret_code} retMsg={ret_msg} resp={str(resp)[:250]}")
+            return out
+
+        lst = (((resp or {}).get("result") or {}).get("list")) or []
         if not isinstance(lst, list) or len(lst) < 210:
+            logger.error(f"BYBIT 4h kline empty/short list: len={len(lst) if isinstance(lst, list) else 'NA'}")
             return out
 
         lst = list(reversed(lst))
@@ -543,7 +602,6 @@ def get_trend_filter_4h() -> Dict[str, float]:
 
         ema50 = calculate_ema(closes, 50)
         ema200 = calculate_ema(closes, 200)
-
         out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
         out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
 
@@ -584,32 +642,41 @@ def get_btc_data() -> Dict[str, Any]:
     }
 
     try:
-        url = (
-            "https://api.bybit.com/v5/market/kline"
-            "?category=linear"
-            "&symbol=BTCUSDT"
-            "&interval=5"
-            "&limit=1000"
+        resp = bybit_get_json(
+            "/v5/market/kline?category=linear&symbol=BTCUSDT&interval=5&limit=1000",
+            timeout=12,
+            retries=1
         )
-
-        resp = http_get_json(url, timeout=12, retries=2)
-        lst = (((resp or {}).get("result") or {}).get("list")) or []
-        if not isinstance(lst, list) or len(lst) < 200:
+        if not resp:
+            logger.error("BYBIT 5m kline: NO RESPONSE")
             return data
 
-        # Bybit: новые->старые, разворачиваем
-        lst = list(reversed(lst))
+        ret_code = resp.get("retCode")
+        ret_msg = resp.get("retMsg")
+        if ret_code not in (0, "0"):
+            logger.error(f"BYBIT kline retCode={ret_code} retMsg={ret_msg} resp={str(resp)[:250]}")
+            # подсказки по логам:
+            # HTTP 403/451 -> домен режется
+            # retCode=10006 -> лимит
+            return data
 
-        # Bybit candle: [startTime, open, high, low, close, volume, turnover]
-        opens = [float(k[1]) for k in lst]
-        highs = [float(k[2]) for k in lst]
-        lows = [float(k[3]) for k in lst]
-        closes = [float(k[4]) for k in lst]
+        klines = (((resp or {}).get("result") or {}).get("list")) or []
+        if not isinstance(klines, list) or len(klines) < 200:
+            logger.error(f"BYBIT empty/short list (kline): len={len(klines) if isinstance(klines, list) else 'NA'}")
+            return data
 
-        base_vols = [float(k[5]) for k in lst]   # BTC
-        quote_vols = [float(k[6]) for k in lst]  # USDT turnover
+        klines = list(reversed(klines))
 
-        window = 144 if len(lst) >= 144 else len(lst)
+        # Bybit: [startTime, open, high, low, close, volume, turnover]
+        opens = [float(k[1]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+
+        base_vols = [float(k[5]) for k in klines]   # BTC
+        quote_vols = [float(k[6]) for k in klines]  # USDT turnover
+
+        window = 144 if len(klines) >= 144 else len(klines)
 
         data["o"] = float(opens[-window])
         data["h"] = float(max(highs[-window:]))
@@ -647,19 +714,30 @@ def get_btc_data() -> Dict[str, Any]:
         else:
             data["vol_ratio"] = 1.0
 
-        # спред через tickers
-        book_url = (
-            "https://api.bybit.com/v5/market/tickers"
-            "?category=linear"
-            "&symbol=BTCUSDT"
+        # spread через tickers
+        tick = bybit_get_json(
+            "/v5/market/tickers?category=linear&symbol=BTCUSDT",
+            timeout=8,
+            retries=1
         )
-        book_resp = http_get_json(book_url, timeout=8, retries=2)
-        tick_list = (((book_resp or {}).get("result") or {}).get("list")) or []
+        if not tick:
+            logger.error("BYBIT tickers: NO RESPONSE")
+            return data
+
+        t_code = tick.get("retCode")
+        t_msg = tick.get("retMsg")
+        if t_code not in (0, "0"):
+            logger.error(f"BYBIT tickers retCode={t_code} retMsg={t_msg} resp={str(tick)[:250]}")
+            return data
+
+        tick_list = (((tick or {}).get("result") or {}).get("list")) or []
         if isinstance(tick_list, list) and tick_list:
-            t = tick_list[0]
-            bid = float(t.get("bid1Price", data["c"]))
-            ask = float(t.get("ask1Price", data["c"]))
+            t0 = tick_list[0]
+            bid = float(t0.get("bid1Price", data["c"]))
+            ask = float(t0.get("ask1Price", data["c"]))
             data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
+        else:
+            logger.error("BYBIT tickers list empty")
 
     except Exception as e:
         logger.exception(f"get_btc_data failed: {e}")
@@ -767,6 +845,7 @@ def aladdin_PRO_analysis():
     risk_percent, risk_factors = calculate_risk(data)
     target, stop, profit_pct, loss_pct = calculate_targets_PRO(data, direction)
 
+    # ✅ WAIT не сохраняем
     if not direction.startswith("⚪"):
         forecast = {
             "time": datetime.now().isoformat(),
@@ -865,7 +944,7 @@ async def decline_handler(callback: CallbackQuery):
     await safe_edit_text(
         callback.message,
         "❌ *Согласие НЕ получено*\n\n"
-        "⚠️ Бот не будет работать без принятия условий.\n"
+        "# ⚠️ Бот не будет работать без принятия условий.\n"
         "Нажмите /start для повторного ознакомления.",
         reply_markup=None,
         parse_mode="Markdown",
@@ -883,8 +962,8 @@ async def agree_handler(callback: CallbackQuery):
     await safe_edit_text(
         callback.message,
         "*✅ СОГЛАСИЕ ПРИНЯТО!*\n\n"
-        "*📊 ALADDIN активирован*\n\n"
-        "📊 Выбери действие:",
+        "# 📊 ALADDIN активирован\n\n"
+        "# 📊 Выбери действие:",
         reply_markup=main_keyboard(),
         parse_mode="Markdown",
     )
@@ -914,24 +993,23 @@ async def analyze_cb(callback: CallbackQuery):
             rr = abs(profit / loss) if loss not in (0.0, -0.0) else 0.0
             vola = ((h - l) / c * 100.0) if c else 0.0
 
-            analysis_text = f"""*📊 АНАЛИЗ*
+            analysis_text = f"""# 📊 АНАЛИЗ
 
-{direction} (`{conf:.1f}%`)
-#📊 RSI: `{float(data.get('rsi', 50)):.1f}`
-#🌊 Volat(12h): `{vola:.1f}%`
-#📈 MA20: `{float(data.get('ma20', c)):,.0f}$`
+# {direction} (`{conf:.1f}%`)
+# 📊 RSI: `{float(data.get('rsi', 50)):.1f}`
+# 🌊 Volat(12h): `{vola:.1f}%`
+# 📈 MA20: `{float(data.get('ma20', c)):,.0f}$`
 
-#⚡ EMA12: `{float(data.get('ema12', c)):,.0f}$`
-#📉 WMA20: `{float(data.get('wma20', c)):,.0f}$`
-#🎯 BOLL: `{float(data.get('bb_position', 50)):.0f}%`
-#💰 VWAP: `{float(data.get('vwap', c)):,.0f}$`
+# ⚡ EMA12: `{float(data.get('ema12', c)):,.0f}$`
+# 📉 WMA20: `{float(data.get('wma20', c)):,.0f}$`
+# 🎯 BOLL: `{float(data.get('bb_position', 50)):.0f}%`
+# 💰 VWAP: `{float(data.get('vwap', c)):,.0f}$`
 
-#💎 *TRADE PLAN:*
-#🚪 Entry: `{c:,.0f}$`
-#🎯 Target: `{target:,.0f}$` ({profit:+.1f}%)
-#🛑 Stop: `{stop:,.0f}$` ({loss:+.1f}%)
-#⚖️ R:R `{rr:.1f}:1`
-
+# 💎 *TRADE PLAN:*
+# 🚪 Entry: `{c:,.0f}$`
+# 🎯 Target: `{target:,.0f}$` ({profit:+.1f}%)
+# 🛑 Stop: `{stop:,.0f}$` ({loss:+.1f}%)
+# ⚖️ R:R `{rr:.1f}:1`
 """
             await safe_edit_text(callback.message, analysis_text, parse_mode="Markdown")
 
@@ -957,42 +1035,42 @@ async def indicators_cb(callback: CallbackQuery):
             data, direction, conf, _, _, _, _, _, _, _, _, _ = await asyncio.to_thread(aladdin_cached)
             c = float(data.get("c", 0) or 0)
 
-            indicators_text = f"""📈 *ИНДИКАТОРЫ* — что они значат? 🤔
+            indicators_text = f"""# 📈 *ИНДИКАТОРЫ* — что они значат? 🤔
 
-#*🔥 ОСНОВНОЙ СИГНАЛ:* `{direction}` `{conf:.1f}%`
+# 🔥 *ОСНОВНОЙ СИГНАЛ:* `{direction}` `{conf:.1f}%`
 
 ────────────────────
 
-#📊 *RSI: `{float(data.get('rsi', 50)):.1f}`*
+# 📊 *RSI: `{float(data.get('rsi', 50)):.1f}`*
 #✅ 30-70 = нормально
 #🟢 <30 = перепродано
 #🔴 >70 = перекуплено
 
-#📈 *MA20: `{float(data.get('ma20', c)):,.0f}$`*
+# 📈 *MA20: `{float(data.get('ma20', c)):,.0f}$`*
 Цена выше = рост 📈
 Цена ниже = падение 📉
 
-#⚡ *EMA12: `{float(data.get('ema12', c)):,.0f}$`*
+# ⚡ *EMA12: `{float(data.get('ema12', c)):,.0f}$`*
 Быстрая линия тренда
 
-#📉 *WMA20: `{float(data.get('wma20', c)):,.0f}$`*
+# 📉 *WMA20: `{float(data.get('wma20', c)):,.0f}$`*
 Быстрее реагирует на движение
 
-#🎯 *BOLL: `{float(data.get('bb_position', 50)):.0f}%`*
+# 🎯 *BOLL: `{float(data.get('bb_position', 50)):.0f}%`*
 #🟢 <20% = дёшево
 #🔴 >80% = дорого
 
-#💰 *VWAP: `{float(data.get('vwap', c)):,.0f}$`*
+# 💰 *VWAP: `{float(data.get('vwap', c)):,.0f}$`*
 Цена выше = выше средней
 
-#🚀 *SAR: `{float(data.get('sar', c)):,.0f}$`*
+# 🚀 *SAR: `{float(data.get('sar', c)):,.0f}$`*
 Цена выше SAR = рост 🟢
 
-#⚡ *TRIX: `{float(data.get('trix', 0)):.2f}`*
+# ⚡ *TRIX: `{float(data.get('trix', 0)):.2f}`*
 #🟢 >0 = импульс вверх
 #🔴 <0 = импульс вниз
 
-#📊 *ADX: `{float(data.get('adx', 0)):.1f}`*
+# 📊 *ADX: `{float(data.get('adx', 0)):.1f}`*
 <18 = флэт 😴
 >25 = тренд ✅
 """
@@ -1032,21 +1110,21 @@ async def risk_cb(callback: CallbackQuery):
             vol_usdt = float(data.get("vol_usdt", data.get("vol", 0)) or 0)
             vol_btc = float(data.get("vol_btc", 0) or 0)
 
-            risk_text = f"""*⚠️ РИСК ({risk}%) & СТАТИСТИКА*
+            risk_text = f"""# ⚠️ *РИСК ({risk}%) & СТАТИСТИКА*
 ─────────────────
-#🎚️ RSI: `{float(data.get('rsi', 50)):.1f}`
-#📊 Volat: `{vola:.1f}%`
-#📈 History: `{hist_acc}%`
+# 🎚️ RSI: `{float(data.get('rsi', 50)):.1f}`
+# 📊 Volat: `{vola:.1f}%`
+# 📈 History: `{hist_acc}%`
 
-#💰 Volume(12h): `{vol_usdt:,.0f}$`
-#🪙 Volume BTC(12h): `{vol_btc:,.0f} BTC`
+# 💰 Volume(12h): `{vol_usdt:,.0f}$`
+# 🪙 Volume BTC(12h): `{vol_btc:,.0f} BTC`
 
-#🔍 *Факторы риска:*
+# 🔍 *Факторы риска:*
 {factors_text}
 """
 
             if signals:
-                risk_text += "\n📌 *Сигналы:*\n" + "\n".join([f"• {s}" for s in signals[:12]])
+                risk_text += "\n# 📌 *Сигналы:*\n" + "\n".join([f"• {s}" for s in signals[:12]])
 
             await safe_edit_text(callback.message, risk_text, parse_mode="Markdown")
 
@@ -1069,9 +1147,9 @@ async def alerts_cb(callback: CallbackQuery):
             state["alert_chat_id"] = callback.message.chat.id
 
         await callback.answer()
-        alerts_text = """*🚨 АЛЕРТЫ АКТИВНЫ* ✅
+        alerts_text = """ 🚨 *АЛЕРТЫ АКТИВНЫ* ✅
 
-#⏰ *Каждые 5 минут проверка:*
+# ⏰ *Каждые 5 минут проверка:*
 #🔄 Смена сигнала LONG/SHORT/WAIT
 #📈 Движение >2.5%
 #🚨 RSI >78 / <22
@@ -1092,7 +1170,7 @@ async def alert_loop():
                 for alert in alerts:
                     if direction.startswith("⚪") and "СИГНАЛ СМЕНИЛСЯ" in alert:
                         continue
-                    await bot.send_message(chat_id, f"🚨 *PRO АЛЕРТ*\n{alert}", parse_mode="Markdown")
+                    await bot.send_message(chat_id, f"# 🚨 *PRO АЛЕРТ*\n# {alert}", parse_mode="Markdown")
                     await asyncio.sleep(1)
 
         except Exception as e:
