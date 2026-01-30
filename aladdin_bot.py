@@ -1,5 +1,5 @@
 # =========================
-# PART 1/2
+# PART 1/2  (BYBIT FIXED)
 # =========================
 import asyncio
 import time
@@ -111,7 +111,7 @@ DISCLAIMER_TEXT = """
 
 
 # =========================
-# HTTP HELPER (missing in your code)
+# HTTP HELPER
 # =========================
 _session = requests.Session()
 
@@ -347,7 +347,6 @@ def calculate_adx(highs: List[float], lows: List[float], closes: List[float], pe
     if not adx_sm:
         return 0.0
 
-    # ✅ фикс: НЕ делим на period
     return float(adx_sm[-1])
 
 
@@ -398,10 +397,6 @@ def save_history(history: List[Dict[str, Any]]):
 
 
 def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> float:
-    """
-    step=3 -> сравнение с ценой через ~15 минут (если обновления каждые 5м)
-    WAIT в точность не учитываем (и мы его не сохраняем вообще).
-    """
     if len(history) < 2:
         return 50.0
 
@@ -450,7 +445,7 @@ def analyze_past_predictions(history: List[Dict[str, Any]], step: int = 3) -> fl
 
     return round((wins / total) * 100.0, 1)
 # =========================
-# PART 2/2
+# PART 2/2  (BYBIT FIXED)
 # =========================
 
 # =========================
@@ -517,7 +512,6 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
         risk_points += 25
         risk_factors.append("💥 Волатильность экстремальная")
 
-    # порог по USDT за 12ч (под себя)
     if vol_usdt < 200_000_000:
         risk_points += 15
         risk_factors.append("📉 Низкий объем")
@@ -526,35 +520,26 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
 
 
 # =========================
-# 4H TREND FILTER
+# 4H TREND FILTER  (BYBIT)
 # =========================
 def get_trend_filter_4h() -> Dict[str, float]:
     out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
-
     try:
         url = (
             "https://api.bybit.com/v5/market/kline"
-            "?category=spot"
+            "?category=linear"
             "&symbol=BTCUSDT"
             "&interval=240"
             "&limit=300"
         )
+        resp = http_get_json(url, timeout=12, retries=2)
+        lst = (((resp or {}).get("result") or {}).get("list")) or []
 
-        raw = http_get_json(url, timeout=12, retries=2)
-
-        # проверка ответа Bybit
-        if not isinstance(raw, dict) or str(raw.get("retCode", "0")) != "0":
-            logger.error(f"Bybit 4h error: {raw}")
+        if not isinstance(lst, list) or len(lst) < 210:
             return out
 
-        klines = raw.get("result", {}).get("list", [])
-        if not isinstance(klines, list) or len(klines) < 210:
-            return out
-
-        # Bybit шлёт от новых к старым
-        klines = list(reversed(klines))
-
-        closes = [float(k[4]) for k in klines]
+        lst = list(reversed(lst))
+        closes = [float(k[4]) for k in lst]  # [start, o, h, l, c, vol, turnover]
 
         ema50 = calculate_ema(closes, 50)
         ema200 = calculate_ema(closes, 200)
@@ -564,135 +549,67 @@ def get_trend_filter_4h() -> Dict[str, float]:
 
     except Exception as e:
         logger.exception(f"get_trend_filter_4h failed: {e}")
-
-    return out
-
-def get_trend_filter_4h() -> Dict[str, float]:
-    out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
-    try:
-        url = (
-    "https://api.bybit.com/v5/market/kline"
-    "?category=spot"
-    "&symbol=BTCUSDT"
-    "&interval=240"
-    "&limit=300"
-)
-raw = http_get_json(url, timeout=12, retries=2)
-klines = raw.get("result", {}).get("list", [])
-if not isinstance(klines, list) or len(klines) < 210:
-    return out
-klines = list(reversed(klines))
-closes = [float(k[4]) for k in klines]
-
-        closes = [float(k[4]) for k in klines]
-        ema50 = calculate_ema(closes, 50)
-        ema200 = calculate_ema(closes, 200)
-        out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
-        out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
-    except Exception as e:
-        logger.exception(f"get_trend_filter_4h failed: {e}")
     return out
 
 
 # =========================
-# 4H TREND FILTER
+# BYBIT DATA (5m)
 # =========================
-def get_trend_filter_4h() -> Dict[str, float]:
-    out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
+def get_btc_data() -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "o": 0.0,
+        "h": 0.0,
+        "l": 0.0,
+        "c": 0.0,
+
+        "vol_btc": 0.0,
+        "vol_usdt": 0.0,
+        "vol": 0.0,
+
+        "spread": 0.0,
+
+        "rsi": 50.0,
+        "sma12": 0.0,
+        "ma20": 0.0,
+        "ema12": 0.0,
+        "wma20": 0.0,
+
+        "bb_position": 50.0,
+        "vwap": 0.0,
+        "sar": 0.0,
+        "supertrend": 0.0,
+        "trix": 0.0,
+        "adx": 0.0,
+        "vol_ratio": 1.0,
+    }
 
     try:
         url = (
             "https://api.bybit.com/v5/market/kline"
-            "?category=spot"
+            "?category=linear"
             "&symbol=BTCUSDT"
-            "&interval=240"
-            "&limit=300"
+            "&interval=5"
+            "&limit=1000"
         )
 
-        raw = http_get_json(url, timeout=12, retries=2)
+        resp = http_get_json(url, timeout=12, retries=2)
+        lst = (((resp or {}).get("result") or {}).get("list")) or []
+        if not isinstance(lst, list) or len(lst) < 200:
+            return data
 
-        # проверка ответа Bybit
-        if not isinstance(raw, dict) or str(raw.get("retCode", "0")) != "0":
-            logger.error(f"Bybit 4h error: {raw}")
-            return out
+        # Bybit: новые->старые, разворачиваем
+        lst = list(reversed(lst))
 
-        klines = raw.get("result", {}).get("list", [])
-        if not isinstance(klines, list) or len(klines) < 210:
-            return out
+        # Bybit candle: [startTime, open, high, low, close, volume, turnover]
+        opens = [float(k[1]) for k in lst]
+        highs = [float(k[2]) for k in lst]
+        lows = [float(k[3]) for k in lst]
+        closes = [float(k[4]) for k in lst]
 
-        # Bybit шлёт от новых к старым
-        klines = list(reversed(klines))
+        base_vols = [float(k[5]) for k in lst]   # BTC
+        quote_vols = [float(k[6]) for k in lst]  # USDT turnover
 
-        closes = [float(k[4]) for k in klines]
-
-        ema50 = calculate_ema(closes, 50)
-        ema200 = calculate_ema(closes, 200)
-
-        out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
-        out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
-
-    except Exception as e:
-        logger.exception(f"get_trend_filter_4h failed: {e}")
-
-    return out
-
-        # Bybit присылает от новых к старым — разворачиваем
-        klines = list(reversed(klines))
-
-        opens  = [float(k[1]) for k in klines]
-        highs  = [float(k[2]) for k in klines]
-        lows   = [float(k[3]) for k in klines]
-        closes = [float(k[4]) for k in klines]
-
-        base_vols  = [float(k[5]) for k in klines]   # BTC volume
-        quote_vols = [float(k[6]) for k in klines]   # USDT turnover (ВАЖНО!)
-
-        window = 144 if len(klines) >= 144 else len(klines)
-
-        data["o"] = float(opens[-window])
-        data["h"] = float(max(highs[-window:]))
-        data["l"] = float(min(lows[-window:]))
-        data["c"] = float(closes[-1])
-
-        data["vol_btc"] = float(sum(base_vols[-window:]))
-        data["vol_usdt"] = float(sum(quote_vols[-window:]))
-        data["vol"] = data["vol_usdt"]
-
-        data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
-        data["ma20"]  = float(sum(cl
-
-    try:
-        url = (
-    "https://api.bybit.com/v5/market/kline"
-    "?category=spot"
-    "&symbol=BTCUSDT"
-    "&interval=5"
-    "&limit=1000"
-)
-
-raw = http_get_json(url, timeout=12, retries=2)
-
-# если Bybit вернул ошибку или не JSON-словарь — сразу выход
-if not isinstance(raw, dict) or raw.get("retCode") not in (0, "0", None):
-    logger.error(f"Bybit error: {raw}")
-    return data
-
-klines = raw.get("result", {}).get("list", [])
-
-if not isinstance(klines, list) or len(klines) < 200:
-    return data
-
-# Bybit присылает от новых к старым — развернём как у Binance
-klines = list(reversed(klines))
-
-        opens = [float(k[1]) for k in klines]
-        highs = [float(k[2]) for k in klines]
-        lows = [float(k[3]) for k in klines]
-        closes = [float(k[4]) for k in klines]
-
-        base_vols = [float(k[5]) for k in klines]   # volume (BTC)
-        quote_vols = [float(k[6]) for k in klines]  # turnover (USDT)
-        window = 144 if len(klines) >= 144 else len(klines)
+        window = 144 if len(lst) >= 144 else len(lst)
 
         data["o"] = float(opens[-window])
         data["h"] = float(max(highs[-window:]))
@@ -715,7 +632,6 @@ klines = list(reversed(klines))
         bb = calculate_bollinger(closes, 20)
         data["bb_position"] = float(bb_position(data["c"], bb))
 
-        # VWAP по BTC объему (base_vols)
         data["vwap"] = float(calculate_vwap(opens, highs, lows, closes, base_vols, period=20))
 
         data["sar"] = float(calculate_sar(highs, lows))
@@ -724,7 +640,6 @@ klines = list(reversed(klines))
         data["trix"] = float(calculate_trix(closes))
         data["adx"] = float(calculate_adx(highs, lows, closes))
 
-        # vol_ratio по USDT (quote)
         if len(quote_vols) >= 40:
             avg_prev = sum(quote_vols[-40:-20]) / 20
             avg_curr = sum(quote_vols[-20:]) / 20
@@ -732,14 +647,19 @@ klines = list(reversed(klines))
         else:
             data["vol_ratio"] = 1.0
 
-        book = http_get_json(
-            "https://fapi.binance.com/fapi/v1/ticker/bookTicker?symbol=BTCUSDT",
-            timeout=8,
-            retries=2
+        # спред через tickers
+        book_url = (
+            "https://api.bybit.com/v5/market/tickers"
+            "?category=linear"
+            "&symbol=BTCUSDT"
         )
-        bid = float(book.get("bidPrice", data["c"]))
-        ask = float(book.get("askPrice", data["c"]))
-        data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
+        book_resp = http_get_json(book_url, timeout=8, retries=2)
+        tick_list = (((book_resp or {}).get("result") or {}).get("list")) or []
+        if isinstance(tick_list, list) and tick_list:
+            t = tick_list[0]
+            bid = float(t.get("bid1Price", data["c"]))
+            ask = float(t.get("ask1Price", data["c"]))
+            data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
 
     except Exception as e:
         logger.exception(f"get_btc_data failed: {e}")
@@ -847,7 +767,6 @@ def aladdin_PRO_analysis():
     risk_percent, risk_factors = calculate_risk(data)
     target, stop, profit_pct, loss_pct = calculate_targets_PRO(data, direction)
 
-    # ✅ ВАЖНО: WAIT не сохраняем в историю (не портит точность)
     if not direction.startswith("⚪"):
         forecast = {
             "time": datetime.now().isoformat(),
@@ -1126,7 +1045,6 @@ async def risk_cb(callback: CallbackQuery):
 {factors_text}
 """
 
-            # ✅ Сигналы показываем тут, а не в Анализе
             if signals:
                 risk_text += "\n📌 *Сигналы:*\n" + "\n".join([f"• {s}" for s in signals[:12]])
 
@@ -1194,9 +1112,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
