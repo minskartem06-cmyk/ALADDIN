@@ -596,7 +596,7 @@ def get_btc_data() -> Dict[str, Any]:
         closes = [float(k[4]) for k in klines]
 
         base_vols = [float(k[5]) for k in klines]
-quote_vols = [float(k[7]) for k in klines]
+quote_vols = [float(k[5]) * float(k[4]) for k in klines]
         window = 144 if len(klines) >= 144 else len(klines)
 
         data["o"] = float(opens[-window])
@@ -1099,6 +1099,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
