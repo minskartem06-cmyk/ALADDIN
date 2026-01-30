@@ -530,12 +530,59 @@ def calculate_risk(data: Dict[str, Any]) -> Tuple[int, List[str]]:
 # =========================
 def get_trend_filter_4h() -> Dict[str, float]:
     out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
-    try:
-        url = "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=4h&limit=300"
-        klines = http_get_json(url, timeout=12, retries=2)
 
+    try:
+        url = (
+            "https://api.bybit.com/v5/market/kline"
+            "?category=spot"
+            "&symbol=BTCUSDT"
+            "&interval=240"
+            "&limit=300"
+        )
+
+        raw = http_get_json(url, timeout=12, retries=2)
+
+        # проверка ответа Bybit
+        if not isinstance(raw, dict) or str(raw.get("retCode", "0")) != "0":
+            logger.error(f"Bybit 4h error: {raw}")
+            return out
+
+        klines = raw.get("result", {}).get("list", [])
         if not isinstance(klines, list) or len(klines) < 210:
             return out
+
+        # Bybit шлёт от новых к старым
+        klines = list(reversed(klines))
+
+        closes = [float(k[4]) for k in klines]
+
+        ema50 = calculate_ema(closes, 50)
+        ema200 = calculate_ema(closes, 200)
+
+        out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
+        out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
+
+    except Exception as e:
+        logger.exception(f"get_trend_filter_4h failed: {e}")
+
+    return out
+
+def get_trend_filter_4h() -> Dict[str, float]:
+    out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
+    try:
+        url = (
+    "https://api.bybit.com/v5/market/kline"
+    "?category=spot"
+    "&symbol=BTCUSDT"
+    "&interval=240"
+    "&limit=300"
+)
+raw = http_get_json(url, timeout=12, retries=2)
+klines = raw.get("result", {}).get("list", [])
+if not isinstance(klines, list) or len(klines) < 210:
+    return out
+klines = list(reversed(klines))
+closes = [float(k[4]) for k in klines]
 
         closes = [float(k[4]) for k in klines]
         ema50 = calculate_ema(closes, 50)
@@ -548,55 +595,103 @@ def get_trend_filter_4h() -> Dict[str, float]:
 
 
 # =========================
-# BINANCE DATA (5m)
+# 4H TREND FILTER
 # =========================
-def get_btc_data() -> Dict[str, Any]:
-    data: Dict[str, Any] = {
-        "o": 0.0,
-        "h": 0.0,
-        "l": 0.0,
-        "c": 0.0,
-
-        "vol_btc": 0.0,
-        "vol_usdt": 0.0,
-        "vol": 0.0,  # совместимость
-
-        "spread": 0.0,
-
-        "rsi": 50.0,
-        "sma12": 0.0,
-        "ma20": 0.0,
-        "ema12": 0.0,
-        "wma20": 0.0,
-
-        "bb_position": 50.0,
-        "vwap": 0.0,
-        "sar": 0.0,
-        "supertrend": 0.0,
-        "trix": 0.0,
-        "adx": 0.0,
-        "vol_ratio": 1.0,
-    }
+def get_trend_filter_4h() -> Dict[str, float]:
+    out = {"ema50_4h": 0.0, "ema200_4h": 0.0}
 
     try:
         url = (
-            "https://api.binance.com/api/v3/klines"
-            "?symbol=BTCUSDT"
-            "&interval=5m"
-            "&limit=1000"
+            "https://api.bybit.com/v5/market/kline"
+            "?category=spot"
+            "&symbol=BTCUSDT"
+            "&interval=240"
+            "&limit=300"
         )
 
-        klines = http_get_json(url, timeout=12, retries=2)
-        if not isinstance(klines, list) or len(klines) < 200:
-            return data
+        raw = http_get_json(url, timeout=12, retries=2)
+
+        # проверка ответа Bybit
+        if not isinstance(raw, dict) or str(raw.get("retCode", "0")) != "0":
+            logger.error(f"Bybit 4h error: {raw}")
+            return out
+
+        klines = raw.get("result", {}).get("list", [])
+        if not isinstance(klines, list) or len(klines) < 210:
+            return out
+
+        # Bybit шлёт от новых к старым
+        klines = list(reversed(klines))
+
+        closes = [float(k[4]) for k in klines]
+
+        ema50 = calculate_ema(closes, 50)
+        ema200 = calculate_ema(closes, 200)
+
+        out["ema50_4h"] = float(ema50[-1] if ema50 else closes[-1])
+        out["ema200_4h"] = float(ema200[-1] if ema200 else closes[-1])
+
+    except Exception as e:
+        logger.exception(f"get_trend_filter_4h failed: {e}")
+
+    return out
+
+        # Bybit присылает от новых к старым — разворачиваем
+        klines = list(reversed(klines))
+
+        opens  = [float(k[1]) for k in klines]
+        highs  = [float(k[2]) for k in klines]
+        lows   = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+
+        base_vols  = [float(k[5]) for k in klines]   # BTC volume
+        quote_vols = [float(k[6]) for k in klines]   # USDT turnover (ВАЖНО!)
+
+        window = 144 if len(klines) >= 144 else len(klines)
+
+        data["o"] = float(opens[-window])
+        data["h"] = float(max(highs[-window:]))
+        data["l"] = float(min(lows[-window:]))
+        data["c"] = float(closes[-1])
+
+        data["vol_btc"] = float(sum(base_vols[-window:]))
+        data["vol_usdt"] = float(sum(quote_vols[-window:]))
+        data["vol"] = data["vol_usdt"]
+
+        data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
+        data["ma20"]  = float(sum(cl
+
+    try:
+        url = (
+    "https://api.bybit.com/v5/market/kline"
+    "?category=spot"
+    "&symbol=BTCUSDT"
+    "&interval=5"
+    "&limit=1000"
+)
+
+raw = http_get_json(url, timeout=12, retries=2)
+
+# если Bybit вернул ошибку или не JSON-словарь — сразу выход
+if not isinstance(raw, dict) or raw.get("retCode") not in (0, "0", None):
+    logger.error(f"Bybit error: {raw}")
+    return data
+
+klines = raw.get("result", {}).get("list", [])
+
+if not isinstance(klines, list) or len(klines) < 200:
+    return data
+
+# Bybit присылает от новых к старым — развернём как у Binance
+klines = list(reversed(klines))
 
         opens = [float(k[1]) for k in klines]
         highs = [float(k[2]) for k in klines]
         lows = [float(k[3]) for k in klines]
         closes = [float(k[4]) for k in klines]
 
-        base_vols = [float(k[5]) for k in klines]
-        quote_vols = [float(k[5]) * float(k[4]) for k in klines]
+        base_vols = [float(k[5]) for k in klines]   # volume (BTC)
+        quote_vols = [float(k[6]) for k in klines]  # turnover (USDT)
         window = 144 if len(klines) >= 144 else len(klines)
 
         data["o"] = float(opens[-window])
@@ -1099,6 +1194,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
