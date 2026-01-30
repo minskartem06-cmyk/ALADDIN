@@ -717,48 +717,77 @@ def get_btc_data() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"BYBIT exception -> fallback: {e}")
 
-    # -------------------------
-    # 2) OKX
-    # -------------------------
-    try:
-        okx = okx_get_json("/api/v5/market/candles?instId=BTC-USDT&bar=5m&limit=1000", timeout=12, retries=1)
-        if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 200:
-            candles = list(reversed(okx["data"]))  # oldest->newest
-            opens = [float(x[1]) for x in candles]
-            highs = [float(x[2]) for x in candles]
-            lows = [float(x[3]) for x in candles]
-            closes = [float(x[4]) for x in candles]
+   # -------------------------
+# 2) OKX (fallback)
+# -------------------------
+try:
+    okx = okx_get_json("/api/v5/market/candles?instId=BTC-USDT&bar=5m&limit=1000", timeout=12, retries=1)
 
-            window = 144 if len(candles) >= 144 else len(candles)
+    if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 200:
+        candles = list(reversed(okx["data"]))  # oldest -> newest
 
-            data["o"] = float(opens[-window])
-            data["h"] = float(max(highs[-window:]))
-            data["l"] = float(min(lows[-window:]))
-            data["c"] = float(closes[-1])
+        # OKX candle:
+        # [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm]
+        opens  = [float(x[1]) for x in candles]
+        highs  = [float(x[2]) for x in candles]
+        lows   = [float(x[3]) for x in candles]
+        closes = [float(x[4]) for x in candles]
 
-            data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
-            data["ma20"] = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
-            ema12_list = calculate_ema(closes, 12)
-            data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
-            data["wma20"] = float(calculate_wma(closes, 20))
-            data["rsi"] = float(calculate_rsi(closes[-200:]))
+        base_vols = [float(x[5]) if len(x) > 5 else 0.0 for x in candles]
+        quote_vols = [float(x[7]) if len(x) > 7 else 0.0 for x in candles]
 
-            bb = calculate_bollinger(closes, 20)
-            data["bb_position"] = float(bb_position(data["c"], bb))
+        window = 144 if len(candles) >= 144 else len(candles)
 
-            t = okx_get_json("/api/v5/market/ticker?instId=BTC-USDT", timeout=8, retries=1)
-            if t and isinstance(t.get("data"), list) and t["data"]:
-                bid = float(t["data"][0].get("bidPx", data["c"]))
-                ask = float(t["data"][0].get("askPx", data["c"]))
-                data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
+        data["o"] = float(opens[-window])
+        data["h"] = float(max(highs[-window:]))
+        data["l"] = float(min(lows[-window:]))
+        data["c"] = float(closes[-1])
 
-            data["_source"] = "okx"
-            return data
+        # volumes
+        data["vol_btc"] = float(sum(base_vols[-window:]))
+        data["vol_usdt"] = float(sum(quote_vols[-window:])) if any(quote_vols) else 0.0
+        data["vol"] = data["vol_usdt"] if data["vol_usdt"] > 0 else data["vol_btc"]
 
-        logger.error("OKX: no candles -> fallback to CoinGecko")
+        # averages
+        data["sma12"] = float(sum(closes[-12:]) / 12) if len(closes) >= 12 else data["c"]
+        data["ma20"]  = float(sum(closes[-20:]) / 20) if len(closes) >= 20 else data["c"]
 
-    except Exception as e:
-        logger.error(f"OKX exception -> fallback: {e}")
+        ema12_list = calculate_ema(closes, 12)
+        data["ema12"] = float(ema12_list[-1]) if ema12_list else data["c"]
+        data["wma20"] = float(calculate_wma(closes, 20))
+
+        # indicators
+        data["rsi"] = float(calculate_rsi(closes[-200:]))
+
+        bb = calculate_bollinger(closes, 20)
+        data["bb_position"] = float(bb_position(data["c"], bb))
+
+        data["vwap"] = float(calculate_vwap(opens, highs, lows, closes, base_vols, period=20))
+        data["sar"] = float(calculate_sar(highs, lows))
+        data["supertrend"] = float(calculate_supertrend(highs, lows, closes))
+        data["trix"] = float(calculate_trix(closes))
+        data["adx"] = float(calculate_adx(highs, lows, closes))
+
+        # volume ratio
+        if len(quote_vols) >= 40 and any(quote_vols):
+            avg_prev = sum(quote_vols[-40:-20]) / 20
+            avg_curr = sum(quote_vols[-20:]) / 20
+            data["vol_ratio"] = float(avg_curr / avg_prev) if avg_prev > 0 else 1.0
+        else:
+            data["vol_ratio"] = 1.0
+
+        # spread
+        ticker = okx_get_json("/api/v5/market/ticker?instId=BTC-USDT", timeout=8, retries=1)
+        if ticker and isinstance(ticker.get("data"), list) and ticker["data"]:
+            bid = float(ticker["data"][0].get("bidPx", data["c"]))
+            ask = float(ticker["data"][0].get("askPx", data["c"]))
+            data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
+
+        data["_source"] = "okx"
+        return data
+
+except Exception as e:
+    logger.error(f"OKX exception: {e}")
 
     # -------------------------
     # 3) CoinGecko (last resort)
@@ -1252,3 +1281,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
