@@ -722,7 +722,7 @@ def get_btc_data() -> Dict[str, Any]:
 # -------------------------
 try:
     okx = okx_get_json("/api/v5/market/candles?instId=BTC-USDT&bar=5m&limit=1000", timeout=12, retries=1)
-
+    
     if okx and isinstance(okx.get("data"), list) and len(okx["data"]) >= 200:
         candles = list(reversed(okx["data"]))  # oldest -> newest
 
@@ -784,7 +784,7 @@ try:
             data["spread"] = float(max(ask - bid, data["c"] * 0.0001))
 
         data["_source"] = "okx"
-        return data
+    return data
 
 except Exception as e:
     logger.error(f"OKX exception: {e}")
