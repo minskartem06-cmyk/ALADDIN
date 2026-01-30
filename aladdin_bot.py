@@ -44,7 +44,7 @@ _analysis_cache_v10 = {"time": 0, "data": None}
 HISTORY_FILE = Path('aladdin_history.json')
 
 DISCLAIMER_TEXT = ""
-🔥 *ALADDIN v10.0 — 5000+ СВЕЧЕЙ ДАННЫХ!*
+#🔥 *ALADDIN v10.0 — 5000+ СВЕЧЕЙ ДАННЫХ!*
 
 ⚠️ *ОБЯЗАТЕЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ ПЕРЕД ИСПОЛЬЗОВАНИЕМ*
 
@@ -872,3 +872,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
