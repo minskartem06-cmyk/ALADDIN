@@ -102,7 +102,7 @@ HISTORY_FILE = Path("aladdin_history.json")
 # DISCLAIMER
 # =========================
 DISCLAIMER_TEXT = """
-# 🔥 *ALADDIN v10.0 — 5000+ СВЕЧЕЙ ДАННЫХ!*
+# 🔥 *ALADDIN v10.0*
 
 # ⚠️ *ОБЯЗАТЕЛЬНОЕ ПРЕДУПРЕЖДЕНИЕ ПЕРЕД ИСПОЛЬЗОВАНИЕМ*
 
@@ -1349,6 +1349,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
